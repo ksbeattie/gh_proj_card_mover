@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+
+'''A script for moving a set of project cards from one project board to another project board.
+
+'''
+
+import argparse
+import logging as log
+import sys
+
+import requests
+
+# Constants & globals
+__author__ = 'Keith Beattie <KSBeattie@lbl.gov>'
+__version__ = '0.1'
+
+# Base URL for GitHub API
+GH_API_URL = 'https://api.github.com/'
+
+# Special header needed while project API is still in 'developer preview'
+GH_DEV_PREVIEW_ACCEPT = 'application/vnd.github.inertia-preview+json'
+
+
+class GHProjCardMoverError(Exception):
+    ''' App specific exception '''
+    pass
+
+
+class GHProjCardMover:
+    ''' Application class '''
+
+    def __init__(self, args):
+        log.debug('args: %s', args)
+
+        # Instance vars
+        self.args = args
+        self.sess = None  # request session object
+        self.user = None  # The authenticated user info dictionary
+
+
+    def setup(self):
+        ''' Set up sessin, try to get user info as a test of connection, auth, etc.'''
+
+        self.sess = requests.Session()
+        self.sess.headers['Authorization'] = 'token {}'.format(self.args.token)
+        self.sess.headers['Accept'] = GH_DEV_PREVIEW_ACCEPT
+
+        log.debug('headers: %s', self.sess.headers)
+
+        # Now try it out
+        res = self.sess.get(GH_API_URL + 'user')
+        self.user = res.json()
+        if res.ok:
+            log.info('Connected as user: %s', self.user['login'])
+        else:
+            raise GHProjCardMoverError(
+                'Unable to initiate session: {}'.format(self.user['message']))
+
+
+    def shutdown(self):
+        '''Thats a wrap'''
+
+        if self.sess:
+            self.sess.close()
+
+
+    def run(self):
+        ''' Get this show on the road... '''
+
+        self.setup()
+
+        log.info('Application entry.')
+
+        # Something interesting happens here...
+
+        log.info('Application end.')
+        self.shutdown()
+
+
+def main():
+    ''' Parse args, initialize and start application '''
+
+    arg_parser = argparse.ArgumentParser(
+        description='Move a set of cards from one github project board to another project board',
+        epilog=__version__)
+    arg_parser.add_argument('-v', '--verbose', action='count', default=0,
+                            help='increase output verbosity')
+    arg_parser.add_argument('-q', '--quiet', action='count', default=0,
+                            help='decrease output verbosity')
+
+    proj_grp = arg_parser.add_argument_group('GitHub project arguments')
+    proj_grp.add_argument('--token', type=str, required=True,
+                          help='The personal token for authenticating to GitHub')
+    proj_grp.add_argument('--from', type=str, required=True,
+                          help='(required) The url of the project to move cards FROM')
+    proj_grp.add_argument('--to', type=str, required=True,
+                          help='(required) The url of the project to move cards TO')
+
+    args = arg_parser.parse_args()
+
+    # Get -q/-v counts and set log level within range
+    llevel = args.verbose - args.quiet
+
+    # Map llevel to python's logger levels
+    llmap = {
+        -2: log.CRITICAL,
+        -1: log.ERROR,
+        0: log.WARNING,
+        1: log.INFO,
+        2: log.DEBUG,
+        3: log.NOTSET
+    }
+
+    # Keep log level within bounds
+    llevel = min(max(llevel, min(llmap)), max(llmap))
+
+    log.basicConfig(stream=sys.stdout, format='%(message)s',
+                    level=llmap[llevel])
+
+    # Add a trace (more verbose than debug)
+    def _trace(message, *args, **kws):
+        log.log(log.NOTSET+1, message, *args, **kws)
+    log.trace = _trace
+
+    app = GHProjCardMover(args)
+    return app.run()
+
+
+if __name__ == '__main__':
+    sys.exit(main())
