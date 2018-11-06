@@ -40,8 +40,14 @@ class GHProjCardMover:
         self.args = args
         self.sess = None  # request session object
         self.user = None  # The authenticated user info dictionary
-        self.src_proj = None
-        self.dest_proj = None
+        self.src_proj = {
+            'proj'    : None,  # The project dict from GH
+            'columns' : [],    # The columns
+            }
+        self.dest_proj = {
+            'proj'    : None,  # The project dict from GH
+            'columns' : [],    # The columns
+            }
 
 
     def setup(self):
@@ -71,15 +77,15 @@ class GHProjCardMover:
             self.sess.close()
 
 
-    def gh_get(self, api, soft_fail=False):
+    def gh_get(self, api, full_url=True, soft_fail=False):
 
         '''Make a GH API get call, return if responce was ok and object built from json.  Unless
            soft_fail is true, raise exception if response is not ok.
-
         '''
 
-        self.log.debug('Calling: %s', api)
-        res = self.sess.get(GH_API_URL + api)
+        api_url = api if full_url else GH_API_URL + api
+        self.log.debug('Calling: %s', api_url)
+        res = self.sess.get(api_url)
         res_obj = res.json()
         if not soft_fail and not res.ok:
             raise GHProjCardMoverError('Failure making call {}, response: {}'.format(api, res_obj))
@@ -100,38 +106,15 @@ class GHProjCardMover:
         if proj != 'projects':
             raise GHProjCardMoverError('URL does not look like a project: ' + url)
 
-        projs = None  # This will be the list of either org or repo projects
+        # Look for projects, using repo API since it seems that org-level projects show up here
+        # too.
+        proj_api = os.path.join('repos', ou_name, repo, proj)
+        _, proj_list = self.gh_get(proj_api, full_url=False)
 
-        # Look for projects, assuming this is a repo-level project
-        repo_api = os.path.join('repos', ou_name, repo, proj)
-        repo_ok, repo_projs = self.gh_get(repo_api, soft_fail=True)
-        if repo_ok:
-            self.log.debug('found %d repository projects', len(repo_projs))
-            projs = repo_projs
-        else:
-            self.log.debug('Does not look like an repo-level project: %s',
-                           repo_projs['message'])
-
-        # Look for projects, assuming this is an org-level project
-        org_api = os.path.join('orgs', ou_name, proj)
-        org_ok, org_projs = self.gh_get(org_api, soft_fail=True)
-        if org_ok:
-            self.log.debug('found %d org projects', len(org_projs))
-            projs = org_projs
-        else:
-            self.log.debug('Does not look like an org-level project: %s',
-                           org_projs['message'])
-
-        if repo_ok and org_ok:
-            raise GHProjCardMoverError('Somehow url is both an org and a repo project: ' + url)
-        elif projs is None:
-            raise GHProjCardMoverError('url is neither an org nor a repo project: ' + url)
-
-        for proj in projs:
+        for proj in proj_list:
             if proj.get('html_url', '') == url:
                 if self.log.level <= logging.TRACE:
                     self.log.trace('found project: %s', pprint.pformat(proj))
-                self.log.info('found project: %s', proj['id'])
                 return proj
 
         raise GHProjCardMoverError('Could not find project for url: ' + url)
@@ -146,10 +129,25 @@ class GHProjCardMover:
         self.setup()
 
         # Get source and dest project details for src and dest project board urls as given
-        self.src_proj = self.get_project_from_url(self.args.src)
-        self.dest_proj = self.get_project_from_url(self.args.dest)
+        self.src_proj['proj'] = self.get_project_from_url(self.args.src)
+        self.log.info('Found source project "%s" with id: %d',
+                      self.src_proj['proj']['name'], self.src_proj['proj']['id'])
 
-        # Get column info for From and To project boards
+        self.dest_proj['proj'] = self.get_project_from_url(self.args.dest)
+        self.log.info('Found destination project "%s" with id: %d',
+                      self.dest_proj['proj']['name'], self.dest_proj['proj']['id'])
+
+        # Get column info for source and dest project boards
+        self.src_proj['columns']  = self.gh_get(self.src_proj['proj']['columns_url'])
+        self.log.info('Found %d columns for "%s"', len(self.src_proj['columns']),
+                      self.src_proj['proj']['name'])
+
+        self.dest_proj['columns'] = self.gh_get(self.dest_proj['proj']['columns_url'])
+        self.log.info('Found %d columns for "%s"', len(self.dest_proj['columns']),
+                      self.dest_proj['proj']['name'])
+
+        self.log.trace(pprint.pformat(self.src_proj))
+        self.log.trace(pprint.pformat(self.dest_proj))
 
         # For each column of the From board:
         #   - Get list of cards, and their corresponding issues/PRs, from first column of the From
