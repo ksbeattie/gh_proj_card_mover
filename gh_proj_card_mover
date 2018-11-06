@@ -5,8 +5,11 @@
 '''
 
 import argparse
-import logging as log
+import logging
+import os
+import pprint
 import sys
+import urllib
 
 import requests
 
@@ -29,13 +32,16 @@ class GHProjCardMoverError(Exception):
 class GHProjCardMover:
     ''' Application class '''
 
-    def __init__(self, args):
-        log.debug('args: %s', args)
+    def __init__(self, log, args):
+        self.log = log
+        self.log.debug('args: %s', args)
 
         # Instance vars
         self.args = args
         self.sess = None  # request session object
         self.user = None  # The authenticated user info dictionary
+        self.src_proj = None
+        self.dest_proj = None
 
 
     def setup(self):
@@ -45,13 +51,13 @@ class GHProjCardMover:
         self.sess.headers['Authorization'] = 'token {}'.format(self.args.token)
         self.sess.headers['Accept'] = GH_DEV_PREVIEW_ACCEPT
 
-        log.debug('headers: %s', self.sess.headers)
+        self.log.trace('headers: %s', self.sess.headers)
 
         # Now try it out
         res = self.sess.get(GH_API_URL + 'user')
         self.user = res.json()
         if res.ok:
-            log.info('Connected as user: %s', self.user['login'])
+            self.log.info('Connected as user: %s', self.user['login'])
         else:
             raise GHProjCardMoverError(
                 'Unable to initiate session: {}'.format(self.user['message']))
@@ -61,19 +67,106 @@ class GHProjCardMover:
         '''Thats a wrap'''
 
         if self.sess:
+            self.log.trace('closing session')
             self.sess.close()
+
+
+    def gh_get(self, api, soft_fail=False):
+
+        '''Make a GH API get call, return if responce was ok and object built from json.  Unless
+           soft_fail is true, raise exception if response is not ok.
+
+        '''
+
+        self.log.debug('Calling: %s', api)
+        res = self.sess.get(GH_API_URL + api)
+        res_obj = res.json()
+        if not soft_fail and not res.ok:
+            raise GHProjCardMoverError('Failure making call {}, response: {}'.format(api, res_obj))
+
+        return res.ok, res_obj
+
+
+
+    def get_project_from_url(self, url):
+        ''' Get project info from the given url of the project '''
+
+        self.log.debug('Looking at project: %s', url)
+
+        # Split up the url
+        par_res = urllib.parse.urlparse(url)
+        _, ou_name, repo, proj, _ = par_res.path.split('/')
+
+        if proj != 'projects':
+            raise GHProjCardMoverError('URL does not look like a project: ' + url)
+
+        projs = None  # This will be the list of either org or repo projects
+
+        # Look for projects, assuming this is a repo-level project
+        repo_api = os.path.join('repos', ou_name, repo, proj)
+        repo_ok, repo_projs = self.gh_get(repo_api, soft_fail=True)
+        if repo_ok:
+            self.log.debug('found %d repository projects', len(repo_projs))
+            projs = repo_projs
+        else:
+            self.log.debug('Does not look like an repo-level project: %s',
+                           repo_projs['message'])
+
+        # Look for projects, assuming this is an org-level project
+        org_api = os.path.join('orgs', ou_name, proj)
+        org_ok, org_projs = self.gh_get(org_api, soft_fail=True)
+        if org_ok:
+            self.log.debug('found %d org projects', len(org_projs))
+            projs = org_projs
+        else:
+            self.log.debug('Does not look like an org-level project: %s',
+                           org_projs['message'])
+
+        if repo_ok and org_ok:
+            raise GHProjCardMoverError('Somehow url is both an org and a repo project: ' + url)
+        elif projs is None:
+            raise GHProjCardMoverError('url is neither an org nor a repo project: ' + url)
+
+        for proj in projs:
+            if proj.get('html_url', '') == url:
+                if self.log.level <= logging.TRACE:
+                    self.log.trace('found project: %s', pprint.pformat(proj))
+                self.log.info('found project: %s', proj['id'])
+                return proj
+
+        raise GHProjCardMoverError('Could not find project for url: ' + url)
+
 
 
     def run(self):
         ''' Get this show on the road... '''
 
+        self.log.info('Application entry.')
+
         self.setup()
 
-        log.info('Application entry.')
+        # Get source and dest project details for src and dest project board urls as given
+        self.src_proj = self.get_project_from_url(self.args.src)
+        self.dest_proj = self.get_project_from_url(self.args.dest)
 
-        # Something interesting happens here...
+        # Get column info for From and To project boards
 
-        log.info('Application end.')
+        # For each column of the From board:
+        #   - Get list of cards, and their corresponding issues/PRs, from first column of the From
+        #     board
+        #   - For each (unclosed) card:
+
+        #       Create a new card with the same issue/PR on the correspondingly named column of the
+        #       To board
+
+
+        # Possible command line args to add:
+        # - Move closed cards as well as open ones (default False)
+        # - Only move between columns with identical names (default true) If False, use column
+        #   position order: left to right.
+
+
+        self.log.info('Application end.')
         self.shutdown()
 
 
@@ -82,7 +175,7 @@ def main():
 
     arg_parser = argparse.ArgumentParser(
         description='Move a set of cards from one github project board to another project board',
-        epilog=__version__)
+        epilog='Version: ' + __version__)
     arg_parser.add_argument('-v', '--verbose', action='count', default=0,
                             help='increase output verbosity')
     arg_parser.add_argument('-q', '--quiet', action='count', default=0,
@@ -91,39 +184,59 @@ def main():
     proj_grp = arg_parser.add_argument_group('GitHub project arguments')
     proj_grp.add_argument('--token', type=str, required=True,
                           help='The personal token for authenticating to GitHub')
-    proj_grp.add_argument('--from', type=str, required=True,
+    proj_grp.add_argument('--src', type=str, required=True,
                           help='(required) The url of the project to move cards FROM')
-    proj_grp.add_argument('--to', type=str, required=True,
+    proj_grp.add_argument('--dest', type=str, required=True,
                           help='(required) The url of the project to move cards TO')
 
     args = arg_parser.parse_args()
 
     # Get -q/-v counts and set log level within range
-    llevel = args.verbose - args.quiet
+    llevel = args.verbose - args.quiet + 1
+
+    # Add a TRACE to logging
+    logging.TRACE = logging.NOTSET + 5
+    logging.addLevelName(logging.TRACE, 'TRACE')
 
     # Map llevel to python's logger levels
     llmap = {
-        -2: log.CRITICAL,
-        -1: log.ERROR,
-        0: log.WARNING,
-        1: log.INFO,
-        2: log.DEBUG,
-        3: log.NOTSET
+        -2: logging.CRITICAL,
+        -1: logging.ERROR,
+        0: logging.WARNING,
+        1: logging.INFO,
+        2: logging.DEBUG,
+        3: logging.TRACE
     }
 
     # Keep log level within bounds
     llevel = min(max(llevel, min(llmap)), max(llmap))
 
-    log.basicConfig(stream=sys.stdout, format='%(message)s',
-                    level=llmap[llevel])
+    logging.basicConfig(stream=sys.stdout, level=llmap[llevel],
+                        format='%(filename)20s: '
+                               '[%(levelname)7s]: '
+                               '%(funcName)s:'
+                               '%(lineno)d: '
+                               '%(message)s')
 
-    # Add a trace (more verbose than debug)
+    log = logging.getLogger(__name__)
+
+    # Add a trace method to the logger
     def _trace(message, *args, **kws):
-        log.log(log.NOTSET+1, message, *args, **kws)
+        log.log(logging.TRACE, message, *args, **kws)
     log.trace = _trace
 
-    app = GHProjCardMover(args)
-    return app.run()
+    ret = 0
+    try:
+        app = GHProjCardMover(log, args)
+        app.run()
+    except GHProjCardMoverError as gherr:
+        ret = 1
+        if llevel >= 2:
+            log.exception(gherr)
+        else:
+            log.error(str(gherr))
+
+    return ret
 
 
 if __name__ == '__main__':
