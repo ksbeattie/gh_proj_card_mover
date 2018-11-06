@@ -94,7 +94,7 @@ class GHProjCardMover:
 
 
 
-    def get_project_from_url(self, url):
+    def get_project(self, url):
         ''' Get project info from the given url of the project '''
 
         self.log.debug('Looking at project: %s', url)
@@ -129,27 +129,27 @@ class GHProjCardMover:
         self.setup()
 
         # Get source and dest project details for src and dest project board urls as given
-        self.src_proj['proj'] = self.get_project_from_url(self.args.src)
+        self.src_proj['proj'] = self.get_project(self.args.src)
         self.log.info('Found source project "%s" with id: %d',
                       self.src_proj['proj']['name'], self.src_proj['proj']['id'])
 
-        self.dest_proj['proj'] = self.get_project_from_url(self.args.dest)
+        self.dest_proj['proj'] = self.get_project(self.args.dest)
         self.log.info('Found destination project "%s" with id: %d',
                       self.dest_proj['proj']['name'], self.dest_proj['proj']['id'])
 
         # Get column info for source and dest project boards
         self.src_proj['columns']  = self.gh_get(self.src_proj['proj']['columns_url'])
-        self.log.info('Found %d columns for "%s"', len(self.src_proj['columns']),
+        self.log.info('Found %d columns for "%s" project', len(self.src_proj['columns']),
                       self.src_proj['proj']['name'])
 
         self.dest_proj['columns'] = self.gh_get(self.dest_proj['proj']['columns_url'])
-        self.log.info('Found %d columns for "%s"', len(self.dest_proj['columns']),
+        self.log.info('Found %d columns for "%s" project', len(self.dest_proj['columns']),
                       self.dest_proj['proj']['name'])
 
         self.log.trace(pprint.pformat(self.src_proj))
         self.log.trace(pprint.pformat(self.dest_proj))
 
-        # For each column of the From board:
+        # For each column of the src board:
         #   - Get list of cards, and their corresponding issues/PRs, from first column of the From
         #     board
         #   - For each (unclosed) card:
