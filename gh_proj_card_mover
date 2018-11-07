@@ -17,108 +17,162 @@ import requests
 __author__ = 'Keith Beattie <KSBeattie@lbl.gov>'
 __version__ = '0.1'
 
-# Base URL for GitHub API
-GH_API_URL = 'https://api.github.com/'
-
-# Special header needed while project API is still in 'developer preview'
-GH_DEV_PREVIEW_ACCEPT = 'application/vnd.github.inertia-preview+json'
-
 
 class GHProjCardMoverError(Exception):
-    ''' App specific exception '''
+    ''' General pupose, app-specific exception '''
     pass
 
 
-class GHProjCardMover:
-    ''' Application class '''
+class GHApi:
+    ''' A class for making REST API calls to GitHub '''
 
-    def __init__(self, log, args):
-        self.log = log
-        self.log.debug('args: %s', args)
-
-        # Instance vars
-        self.args = args
-        self.sess = None  # request session object
+    def __init__(self):
+        self.log = logging.getLogger(__name__)
+        self.sess = None  # The request session object
         self.user = None  # The authenticated user info dictionary
-        self.src_proj = {
-            'proj'    : None,  # The project dict from GH
-            'columns' : [],    # The columns
-            }
-        self.dest_proj = {
-            'proj'    : None,  # The project dict from GH
-            'columns' : [],    # The columns
-            }
+        self.gh_api_base = 'https://api.github.com/'
 
 
-    def setup(self):
-        ''' Set up sessin, try to get user info as a test of connection, auth, etc.'''
-
+    def setup(self, token):
+        ''' Set up session, try to get user info as a test of connection, auth, etc. '''
         self.sess = requests.Session()
-        self.sess.headers['Authorization'] = 'token {}'.format(self.args.token)
-        self.sess.headers['Accept'] = GH_DEV_PREVIEW_ACCEPT
+        self.sess.headers['Authorization'] = 'token {}'.format(token)
+
+        # Needed while project REST API is in "developer preview"
+        self.sess.headers['Accept'] = 'application/vnd.github.inertia-preview+json'
 
         self.log.trace('headers: %s', self.sess.headers)
 
         # Now try it out
-        res = self.sess.get(GH_API_URL + 'user')
+        res = self.sess.get(self.gh_api_base + 'user')
         self.user = res.json()
         if res.ok:
-            self.log.info('Connected as user: %s', self.user['login'])
+            self.log.info(self)
         else:
             raise GHProjCardMoverError(
                 'Unable to initiate session: {}'.format(self.user['message']))
 
 
     def shutdown(self):
-        '''Thats a wrap'''
-
+        ''' Close the underlying session object '''
         if self.sess:
             self.log.trace('closing session')
             self.sess.close()
 
 
-    def gh_get(self, api, full_url=True, soft_fail=False):
+    def get(self, api_path, full_url=True):
+        '''Make a GH API get call returning an object built from json response.  If full_url is
+        False, then the gh_api_base will be prepended to api. '''
 
-        '''Make a GH API get call, return if responce was ok and object built from json.  Unless
-           soft_fail is true, raise exception if response is not ok.
-        '''
-
-        api_url = api if full_url else GH_API_URL + api
+        api_url = api_path if full_url else self.gh_api_base + api_path
         self.log.debug('Calling: %s', api_url)
         res = self.sess.get(api_url)
         res_obj = res.json()
-        if not soft_fail and not res.ok:
-            raise GHProjCardMoverError('Failure making call {}, response: {}'.format(api, res_obj))
+        if not res.ok:
+            raise GHProjCardMoverError('Failed API call to: {}, response: {}'.\
+                                       format(api_path, res_obj))
+        return res_obj
 
-        return res.ok, res_obj
+
+    def __str__(self):
+        if self.sess:
+            return 'Api: auth as {}'.format(self.user['login'])
+        return 'Api: not yet setup'
 
 
+class GHCol:
+    ''' A class to represent a column on a project board and it's cards '''
 
-    def get_project(self, url):
-        ''' Get project info from the given url of the project '''
+    def __init__(self, api):
+        self.log = logging.getLogger(__name__)
+        self.api = api
+        self.col = None  # The column dict from GH
+        self.cards = []  # The list of cards for this column
 
-        self.log.debug('Looking at project: %s', url)
 
-        # Split up the url
-        par_res = urllib.parse.urlparse(url)
+    def setup(self, col):
+        '''Set up with card info '''
+        self.col = col
+        self.cards = self.api.get(self.col['cards_url'])
+        self.log.info(self)
+
+
+    def __str__(self):
+        if self.col:
+            return 'Column: "{}" ({}) with {} cards'.\
+                format(self.col['name'], self.col['id'], len(self.cards))
+        return 'Column: not yet set up'
+
+
+class GHProj:
+    ''' A class to represent a project board and it's columns. '''
+
+    def __init__(self, api):
+        ''' Construct a new object from the given project html_url '''
+        self.log = logging.getLogger(__name__)
+        self.api = api
+        self.proj = None  # The product dict from GH
+        self.cols = []    # A list of GHCol objects
+
+
+    def setup(self, html_url):
+        ''' Set up with html url of project '''
+        self.log.debug('Looking for project: %s', html_url)
+
+        # Split up the html_url in prep for API call
+        par_res = urllib.parse.urlparse(html_url)
         _, ou_name, repo, proj, _ = par_res.path.split('/')
 
         if proj != 'projects':
-            raise GHProjCardMoverError('URL does not look like a project: ' + url)
+            raise GHProjCardMoverError('URL does not look like a project: ' + html_url)
 
-        # Look for projects, using repo API since it seems that org-level projects show up here
-        # too.
-        proj_api = os.path.join('repos', ou_name, repo, proj)
-        _, proj_list = self.gh_get(proj_api, full_url=False)
+        # Decide which api path to use, based on if this looks like an org-level
+        # project or a repo-level project
+        if ou_name == 'orgs':  # org-level project
+            proj_api_path = os.path.join(ou_name, repo, proj)
+        else: # assume repo-level project
+            proj_api_path = os.path.join('repos', ou_name, repo, proj)
 
+        proj_list = self.api.get(proj_api_path, full_url=False)
+
+        # Find this project in the list of projects returned
         for proj in proj_list:
-            if proj.get('html_url', '') == url:
+            if proj.get('html_url', '') == html_url:
                 if self.log.level <= logging.TRACE:
                     self.log.trace('found project: %s', pprint.pformat(proj))
-                return proj
+                self.proj = proj
+                break
 
-        raise GHProjCardMoverError('Could not find project for url: ' + url)
+        if self.proj is None:
+            raise GHProjCardMoverError('Could not find project for url: ' + html_url)
+        else:
+            self.log.info(self)
 
+        # Populate columns
+        for col in self.api.get(self.proj['columns_url']):
+            self.cols.append(GHCol(self.api).setup(col))
+
+
+    def __str__(self):
+        if self.proj:
+            return 'Project "{}" ({}) with {} columns'.\
+                format(self.proj['name'], self.proj['id'], len(self.cols))
+        return 'Project: not yet set up'
+
+
+
+class GHProjCardMover:
+    ''' Application class '''
+
+    def __init__(self, args):
+        self.log = logging.getLogger(__name__)
+        self.log.debug('args: %s', args)
+
+        # Instance vars
+        self.args = args
+        self.api = GHApi()  # The GHApi object for making GH REST API calls
+        self.src_proj = GHProj(self.api)  # A GHProj for the source board
+        self.dest_proj = GHProj(self.api) # A GHProj for the destination board
 
 
     def run(self):
@@ -126,28 +180,19 @@ class GHProjCardMover:
 
         self.log.info('Application entry.')
 
-        self.setup()
+        # Initialize the API
+        self.api.setup(self.args.token)
 
-        # Get source and dest project details for src and dest project board urls as given
-        self.src_proj['proj'] = self.get_project(self.args.src)
-        self.log.info('Found source project "%s" with id: %d',
-                      self.src_proj['proj']['name'], self.src_proj['proj']['id'])
+        # Get source project board
+        self.src_proj.setup(self.args.src)
+        self.log.info(self.src_proj)
 
-        self.dest_proj['proj'] = self.get_project(self.args.dest)
-        self.log.info('Found destination project "%s" with id: %d',
-                      self.dest_proj['proj']['name'], self.dest_proj['proj']['id'])
+        #for col in self.src_proj.cols:
+        #    self.log.info('  Col: %s', col)
 
-        # Get column info for source and dest project boards
-        self.src_proj['columns']  = self.gh_get(self.src_proj['proj']['columns_url'])
-        self.log.info('Found %d columns for "%s" project', len(self.src_proj['columns']),
-                      self.src_proj['proj']['name'])
-
-        self.dest_proj['columns'] = self.gh_get(self.dest_proj['proj']['columns_url'])
-        self.log.info('Found %d columns for "%s" project', len(self.dest_proj['columns']),
-                      self.dest_proj['proj']['name'])
-
-        self.log.trace(pprint.pformat(self.src_proj))
-        self.log.trace(pprint.pformat(self.dest_proj))
+        # And the dest project board
+        self.dest_proj.setup(self.args.dest)
+        self.log.info(self.dest_proj)
 
         # For each column of the src board:
         #   - Get list of cards, and their corresponding issues/PRs, from first column of the From
@@ -165,7 +210,7 @@ class GHProjCardMover:
 
 
         self.log.info('Application end.')
-        self.shutdown()
+        self.api.shutdown()
 
 
 def main():
@@ -195,6 +240,7 @@ def main():
     # Add a TRACE to logging
     logging.TRACE = logging.NOTSET + 5
     logging.addLevelName(logging.TRACE, 'TRACE')
+    setattr(logging, 'TRACE', logging.TRACE)
 
     # Map llevel to python's logger levels
     llmap = {
@@ -209,23 +255,25 @@ def main():
     # Keep log level within bounds
     llevel = min(max(llevel, min(llmap)), max(llmap))
 
-    logging.basicConfig(stream=sys.stdout, level=llmap[llevel],
-                        format='%(filename)20s: '
-                               '[%(levelname)7s]: '
-                               '%(funcName)s:'
-                               '%(lineno)d: '
+    logging.basicConfig(stream=sys.stdout,
+                        format='%(asctime)s: '
+                               '%(levelname)-8s: '
+                               '%(funcName)-10s:'
+                               '%(lineno)4d: '
                                '%(message)s')
 
     log = logging.getLogger(__name__)
+    log.setLevel(llmap[llevel])
 
-    # Add a trace method to the logger
-    def _trace(message, *args, **kws):
-        log.log(logging.TRACE, message, *args, **kws)
-    log.trace = _trace
+    # Add a trace method to this logger
+    def _trace(self, message, *args, **kws):
+        if self.isEnabledFor(logging.TRACE):
+            self._log(logging.TRACE, message, args, **kws) # pylint: disable=protected-access
+    setattr(logging.getLoggerClass(), 'trace', _trace)
 
     ret = 0
     try:
-        app = GHProjCardMover(log, args)
+        app = GHProjCardMover(args)
         app.run()
     except GHProjCardMoverError as gherr:
         ret = 1
