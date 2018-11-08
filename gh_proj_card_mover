@@ -5,6 +5,7 @@
 '''
 
 import argparse
+import json
 import logging
 import os
 from pprint import pformat as pf
@@ -63,17 +64,31 @@ class GHApi:
 
     def get(self, api_path, full_url=True):
         '''Make a GH API get call returning an object built from json response.  If full_url is
-        False, then the gh_api_base will be prepended to api. '''
+        False, then the gh_api_base will be prepended to api_path. '''
 
         api_url = api_path if full_url else self.gh_api_base + api_path
         self.log.debug('Calling: %s', api_url)
         res = self.sess.get(api_url)
         res_obj = res.json()
         if not res.ok:
-            raise GHProjCardMoverError('Failed API call to: {}, response: {}'.\
+            raise GHProjCardMoverError('Failed API get call to: {}, response: {}'.\
                                        format(api_path, res_obj))
 
         # ToDo: need to check for pagination (if we need to make another call to get all the data)
+        return res_obj
+
+
+    def post(self, api_path, full_url=True, data=None):
+        ''' Make a GH API post call, returning object build from json response.  If full_url is
+        False then gh_api_base will be prepended to api_path. '''
+
+        api_url = api_path if full_url else self.gh_api_base + api_path
+        self.log.debug('Calling: %s', api_url)
+        res = self.sess.post(api_url, data=json.dumps(data))
+        res_obj = res.json()
+        if not res.ok:
+            raise GHProjCardMoverError('Failed API post call to: {}, response: {}'.\
+                                       format(api_path, res_obj))
         return res_obj
 
 
@@ -224,18 +239,30 @@ class GHProjCardMover:
                 raise GHProjCardMoverError('Destination board does not have column named: {}'.\
                                            format(src_col['name']))
 
-            for card in src_col.cards:
-                self.log.info('    Card: %s', card['content_url'])
-                self.log.info(pf(card))
+            # Walk through cards backwards so they end up in the same order in
+            # the new column
+            for card in reversed(src_col.cards):
+                self.log.trace('Card: %s', pf(card))
+                card_info = {} # for creating the new card
+                if card['note']:  # This is a note card
+                    self.log.info('    Card (note): %s', card['note'])
+                    card_info['note'] = card['note']
+                else: # This is an issue or a pr
+                    self.log.info('    Card: (issue/pr) %s', card['content_url'])
+                    issue = self.api.get(card['content_url'])
+                    self.log.trace('issue: %s', pf(issue))
+                    if 'pull_request' in issue.keys(): # This is a pr
+                        pullr = self.api.get(issue['pull_request']['url'])
+                        card_info['content_id'] = pullr['id']
+                        card_info['content_type'] = 'PullRequest'
+                    else: # Just an issue
+                        card_info['content_id'] = issue['id']
+                        card_info['content_type'] = 'Issue'
 
-        #   - For each (unclosed?) card on this column:
-        #     - Create a new card with same content_url (issue/PR)
-        #     - Add it to destination column
-
-        for col in self.dest_proj.cols:
-            self.log.info('  Col: %s', col)
-            for card in col.cards:
-                self.log.info('    Card: %s', card['content_url'])
+                # Now create the new card in the destination column
+                self.log.trace('card_info: %s', pf(card_info))
+                post_res = self.api.post(dest_col['cards_url'], data=card_info)
+                self.log.trace('create card response: %s', pf(post_res))
 
 
     def run(self):
@@ -249,10 +276,12 @@ class GHProjCardMover:
         # Now move cards
         self.move_cards()
 
-        # Possible command line args to add:
+        # ToDo: Possible command line args to add:
+        # - dry run: do everything but don't actually create the new card on the dest column
         # - Move closed cards as well as open ones (default False)
         # - Only move between columns with identical names (default true) If False, use column
         #   position order: left to right.
+        # - Stop of keep going if a card already exist in the dest column?
 
 
         self.log.debug('Application end.')
