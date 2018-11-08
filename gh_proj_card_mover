@@ -92,6 +92,20 @@ class GHApi:
         return res_obj
 
 
+    def delete(self, api_path, full_url=True):
+        '''Make a GH API delete call, returning if responce success (or raising exception).  If full_url is
+           False then gh_api_base will be prepended to api_path.
+        '''
+
+        api_url = api_path if full_url else self.gh_api_base + api_path
+        self.log.debug('Calling: %s', api_url)
+        res = self.sess.delete(api_url)
+        if not res.ok:
+            raise GHProjCardMoverError('Failed API delete call to: {}, response: {}'.\
+                                       format(api_path, res.content))
+        return res.ok
+
+
     def __str__(self):
         if self.sess:
             return 'Api: auth as {}'.format(self.user['login'])
@@ -264,6 +278,11 @@ class GHProjCardMover:
                 post_res = self.api.post(dest_col['cards_url'], data=card_info)
                 self.log.trace('create card response: %s', pf(post_res))
 
+                if not self.args.copy: # Delete the source card
+                    self.log.info('About to delete source card: ')
+                    self.api.delete(card['url'])
+
+
 
     def run(self):
         ''' Get this show on the road... '''
@@ -298,6 +317,9 @@ def main():
                             help='increase output verbosity')
     arg_parser.add_argument('-q', '--quiet', action='count', default=0,
                             help='decrease output verbosity')
+    arg_parser.add_argument('-c', '--copy', action='store_true',
+                            help='Do not remove cards from source project, '
+                            'just copy them to the destination project.')
 
     proj_grp = arg_parser.add_argument_group('GitHub project arguments')
     proj_grp.add_argument('--token', type=str, required=True,
