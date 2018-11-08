@@ -7,7 +7,7 @@
 import argparse
 import logging
 import os
-import pprint
+from pprint import pformat as pf
 import sys
 import urllib
 
@@ -93,6 +93,10 @@ class GHCol:
         self.cards = []  # The list of cards for this column
 
 
+    def __getitem__(self, item):
+        return self.col[item]
+
+
     def setup(self, col):
         '''Set up with card info '''
         self.col = col
@@ -119,6 +123,10 @@ class GHProj:
         self.cols = []    # A list of GHCol objects
 
 
+    def __getitem__(self, item):
+        return self.proj[item]
+
+
     def setup(self, html_url):
         ''' Set up with html url of project '''
         self.log.debug('Looking for project: %s', html_url)
@@ -130,11 +138,10 @@ class GHProj:
         if proj != 'projects':
             raise GHProjCardMoverError('URL does not look like a project: ' + html_url)
 
-        # Decide which api path to use, based on if this looks like an org-level
-        # project or a repo-level project
+        # Decide which api path to use
         if ou_name == 'orgs':  # org-level project
             proj_api_path = os.path.join(ou_name, repo, proj)
-        else: # assume repo-level project
+        else:                  # repo-level project
             proj_api_path = os.path.join('repos', ou_name, repo, proj)
 
         proj_list = self.api.get(proj_api_path, full_url=False)
@@ -143,7 +150,7 @@ class GHProj:
         for proj in proj_list:
             if proj.get('html_url', '') == html_url:
                 if self.log.level <= logging.TRACE:
-                    self.log.trace('found project: %s', pprint.pformat(proj))
+                    self.log.trace('found project: %s', pf(proj))
                 self.proj = proj
                 break
 
@@ -157,6 +164,14 @@ class GHProj:
             self.cols.append(GHCol(self.api).setup(col))
 
         return self
+
+
+    def find_col_by_name(self, cname):
+        ''' Return the column dict with the given name, None if not found. '''
+        for col in self.cols:
+            if col['name'] == cname:
+                return col
+        return None
 
 
     def __str__(self):
@@ -197,13 +212,22 @@ class GHProjCardMover:
     def move_cards(self):
         ''' Create new cards on dest project, on corresponding column of from source project '''
 
-        # For each column of the src board:
-        for col in self.src_proj.cols:
-            self.log.info('  Col: %s', col)
-            for card in col.cards:
-                self.log.info('    Card: %s', card['content_url'])
+        self.log.info('Moving cards from: %s', self.src_proj)
 
-        #   - Look for corresponding column on destination board, fail if not found
+        # For each column of the src board:
+        for src_col in self.src_proj.cols:
+            self.log.info('  Col: %s', src_col)
+
+            # Corresponding column on destination board
+            dest_col = self.dest_proj.find_col_by_name(src_col['name'])
+            if dest_col is None:
+                raise GHProjCardMoverError('Destination board does not have column named: {}'.\
+                                           format(src_col['name']))
+
+            for card in src_col.cards:
+                self.log.info('    Card: %s', card['content_url'])
+                self.log.info(pf(card))
+
         #   - For each (unclosed?) card on this column:
         #     - Create a new card with same content_url (issue/PR)
         #     - Add it to destination column
