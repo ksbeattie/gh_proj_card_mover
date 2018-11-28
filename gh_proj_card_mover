@@ -24,18 +24,31 @@ class GHProjCardMoverError(Exception):
     pass
 
 
+class DryRunResponse(): # pylint: disable=too-few-public-methods
+    ''' A mock response object for when dry run is enabled. '''
+    ok = True
+    content = 'This is a dry run mock repsonce object'
+    def json(self):
+        ''' return a dict for this mock object '''
+        return {
+            'ok': self.ok,
+            'content': self.content
+        }
+
 class GHApi:
     ''' A class for making REST API calls to GitHub '''
 
     def __init__(self):
         self.log = logging.getLogger(__name__)
+        self.dry_run = False
         self.sess = None  # The request session object
         self.user = None  # The authenticated user info dictionary
         self.gh_api_base = 'https://api.github.com/'
 
 
-    def setup(self, token):
+    def setup(self, token, dry_run=False):
         ''' Set up session, try to get user info as a test of connection, auth, etc. '''
+        self.dry_run = dry_run
         self.sess = requests.Session()
         self.sess.headers['Authorization'] = 'token {}'.format(token)
 
@@ -84,7 +97,10 @@ class GHApi:
 
         api_url = api_path if full_url else self.gh_api_base + api_path
         self.log.debug('Calling: %s', api_url)
-        res = self.sess.post(api_url, data=json.dumps(data))
+        if self.dry_run:
+            res = DryRunResponse()
+        else:
+            res = self.sess.post(api_url, data=json.dumps(data))
         res_obj = res.json()
         if not res.ok:
             raise GHProjCardMoverError('Failed API post call to: {}, response: {}'.\
@@ -93,13 +109,17 @@ class GHApi:
 
 
     def delete(self, api_path, full_url=True):
-        '''Make a GH API delete call, returning if responce success (or raising exception).  If full_url is
-           False then gh_api_base will be prepended to api_path.
+        '''Make a GH API delete call, returning if responce success (or raising exception).  If
+           full_url is False then gh_api_base will be prepended to api_path.
+
         '''
 
         api_url = api_path if full_url else self.gh_api_base + api_path
         self.log.debug('Calling: %s', api_url)
-        res = self.sess.delete(api_url)
+        if self.dry_run:
+            res = DryRunResponse()
+        else:
+            res = self.sess.delete(api_url)
         if not res.ok:
             raise GHProjCardMoverError('Failed API delete call to: {}, response: {}'.\
                                        format(api_path, res.content))
@@ -227,7 +247,7 @@ class GHProjCardMover:
 
     def setup(self):
         ''' Setup '''
-        self.api.setup(self.args.token)
+        self.api.setup(self.args.token, self.args.dry_run)
 
         # Get source project board
         self.src_proj.setup(self.args.src)
@@ -246,6 +266,12 @@ class GHProjCardMover:
         # For each column of the src board:
         for src_col in self.src_proj.cols:
             self.log.info('  Col: %s', src_col)
+
+            # Check if we're only working with one column
+            if self.args.column and self.args.column != src_col['name']:
+                self.log.info('    Skipping column "%s", looking for "%s"', src_col['name'],
+                              self.args.column)
+                continue
 
             # Corresponding column on destination board
             dest_col = self.dest_proj.find_col_by_name(src_col['name'])
@@ -296,12 +322,10 @@ class GHProjCardMover:
         self.move_cards()
 
         # ToDo: Possible command line args to add:
-        # - dry run: do everything but don't actually create the new card on the dest column
         # - Move closed cards as well as open ones (default False)
-        # - Only move between columns with identical names (default true) If False, use column
+        # - Don't just move between columns with identical names add an option to use column
         #   position order: left to right.
-        # - Stop of keep going if a card already exist in the dest column?
-
+        # - Option to keep going if a card already exist in the dest column
 
         self.log.debug('Application end.')
         self.api.shutdown()
@@ -317,6 +341,12 @@ def main():
                             help='increase output verbosity')
     arg_parser.add_argument('-q', '--quiet', action='count', default=0,
                             help='decrease output verbosity')
+    arg_parser.add_argument('-n', '--dry-run', action='store_true', default=False,
+                            help='Dry run: do everything but do not modify either source or'
+                            'destination boards')
+    arg_parser.add_argument('-C', '--column', type=str, default=None,
+                            help='Move cards only between the named column (default: move between '
+                            'all identically named columns)')
     arg_parser.add_argument('-c', '--copy', action='store_true',
                             help='Do not remove cards from source project, '
                             'just copy them to the destination project.')
@@ -352,12 +382,16 @@ def main():
     # Keep log level within bounds
     llevel = min(max(llevel, min(llmap)), max(llmap))
 
-    logging.basicConfig(stream=sys.stdout,
-                        format='%(asctime)s: '
-                               '%(levelname)-5s: '
-                               '%(funcName)-10s:'
-                               '%(lineno)4d: '
-                               '%(message)s')
+    format_str = '%(asctime)s: '     \
+                 '%(levelname)-5s: ' \
+                 '%(funcName)-10s:'  \
+                 '%(lineno)4d: '
+    if args.dry_run:
+        format_str += '(dry-ryn) %(message)s'
+    else:
+        format_str += '%(message)s'
+
+    logging.basicConfig(stream=sys.stdout, format=format_str)
 
     log = logging.getLogger(__name__)
     log.setLevel(llmap[llevel])
